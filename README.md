@@ -1,6 +1,6 @@
 # IriunWebcam-AppImage
 
-AppImage for [Iriun Webcam](https://iriun.gitlab.io) — use your phone's camera as a wireless webcam in Linux. Built from the official `.deb` via `appimagetool` for use with [Soar](https://github.com/pkgforge/soar).
+AppImage for [Iriun Webcam](https://iriun.gitlab.io) — use your phone's camera as a wireless webcam in Linux. Built from the official `.deb` via `appimagetool` + `onelf` for use with [Soar](https://github.com/pkgforge/soar).
 
 [![Latest Release](https://img.shields.io/github/v/release/sharno/IriunWebcam-AppImage)](https://github.com/sharno/IriunWebcam-AppImage/releases/latest)
 [![Soar Package](https://img.shields.io/badge/soar-iriunwebcam-blue)](https://github.com/pkgforge/soarpkgs/pull/986)
@@ -18,22 +18,27 @@ soar install iriunwebcam
 # github = "sharno/IriunWebcam-AppImage"
 ```
 
-Requires host: `v4l2loopback-dkms`, `libQt6Widgets.so.6`, PipeWire. Portable reason: kernel module + PipeWire integration.
+**Requires host:** `v4l2loopback-dkms` (kernel module, cannot be bundled) + PipeWire daemon. **Bundled:** Qt6 + 87 libs (see below), so no host `libQt6*` needed. Portable reason: kernel module + PipeWire integration.
 
-## What's bundled
+## What's bundled (39 MiB AppImage, 102 MiB uncompressed)
 
-- `usr/local/bin/iriunwebcam` (ELF x86_64, Qt6) → `AppDir/usr/bin/iriunwebcam`
-- `usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio/libspa-iriunaudio.so` → `AppDir/usr/lib/...`
-- `usr/share/applications/iriunwebcam.desktop` + `usr/share/pixmaps/iriunwebcam.png` → `AppDir/`
-- `usr/share/pipewire/pipewire.conf.d/iriunaudio.conf`
+- `usr/local/bin/iriunwebcam` (ELF x86_64) → `AppDir/usr/bin/iriunwebcam` (patched `RUNPATH $ORIGIN/../lib`)
+- **87 libs** via `onelf bundle-libs` (98 MiB): `libQt6Core/Gui/Widgets/Network`, `libicu*` (29M), `libQt6DBus`, `libharfbuzz`, `libpng`, `libfreetype`, `libavahi`, `libasound`, `libdrm`, `libsystemd`, `libgnutls`, `libcrypto`, `libstdc++`, etc. – stripped
+- **Qt plugins** `usr/lib/qt6/plugins` (3.4 MiB): `platforms/libqxcb.so`, `imageformats`, `tls`, `wayland-*`, `xcbglintegrations` (+ `libQt6XcbQpa.so.6` added manually)
+- `usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio/libspa-iriunaudio.so` → `AppDir/usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio/`
+- `usr/share/applications/iriunwebcam.desktop` + `usr/share/pixmaps/iriunwebcam.png` → `AppDir/` + `.DirIcon`
+- `usr/share/pipewire/pipewire.conf.d/iriunaudio.conf` → `AppDir/usr/share/pipewire/`
 
 `AppRun`:
 ```sh
 #!/bin/sh
 HERE=$(dirname "$(readlink -f "$0")")
-export LD_LIBRARY_PATH="$HERE/usr/lib/x86_64-linux-gnu:$HERE/usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+export QT_PLUGIN_PATH="$HERE/usr/lib/qt6/plugins"
+export QML2_IMPORT_PATH="$HERE/usr/lib/qt6/qml"
 exec "$HERE/usr/bin/iriunwebcam" "$@"
 ```
+Verified: `QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=offscreen ./IriunWebcam-2.9.3-x86_64.AppImage` loads `xcb`/`offscreen` (`qt.core.plugin.factoryloader: Got keys QList("xcb")`), no `libQt6* not found`.
 
 ## Build
 
@@ -45,20 +50,41 @@ curl -LO https://iriun.gitlab.io/iriunwebcam-2.9.3.deb
 ar x iriunwebcam-2.9.3.deb
 tar -I zstd -xf data.tar.zst
 
-# 3. Create AppDir
-mkdir -p AppDir/usr/bin AppDir/usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio
-cp usr/local/bin/iriunwebcam AppDir/usr/bin/
+# 3. Bundle libs with onelf (87 libs, no --gl/--dri/--vulkan/--wayland to keep size 98M vs quick-sharun 1.5G)
+curl -LO https://github.com/QaidVoid/onelf/releases/download/0.3.2/onelf-x86_64-linux
+chmod +x onelf
+rm -rf out && ./onelf bundle-libs out --from-binary ./usr/local/bin/iriunwebcam --strip
+
+# 4. Create AppDir from out + Qt plugins + spa plugin
+mkdir -p AppDir/usr/bin AppDir/usr/lib
+cp out/bin/iriunwebcam AppDir/usr/bin/
+cp -a out/lib/* AppDir/usr/lib/
+cp -a /usr/lib/x86_64-linux-gnu/qt6/plugins AppDir/usr/lib/qt6/
+cp /usr/lib/x86_64-linux-gnu/libQt6XcbQpa.so.6* AppDir/usr/lib/  # dlopen'd, not in ldd
+mkdir -p AppDir/usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio
 cp usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio/libspa-iriunaudio.so AppDir/usr/lib/x86_64-linux-gnu/spa-0.2/iriunaudio/
 cp usr/share/applications/iriunwebcam.desktop AppDir/
 cp usr/share/pixmaps/iriunwebcam.png AppDir/.DirIcon
 cp usr/share/pixmaps/iriunwebcam.png AppDir/iriunwebcam.png
-
-# 4. Add AppRun (see above) then:
+mkdir -p AppDir/usr/share/pipewire/pipewire.conf.d
+cp usr/share/pipewire/pipewire.conf.d/iriunaudio.conf AppDir/usr/share/pipewire/pipewire.conf.d/
+cat > AppDir/AppRun <<'EOS'
+#!/bin/sh
+HERE=$(dirname "$(readlink -f "$0")")
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+export QT_PLUGIN_PATH="$HERE/usr/lib/qt6/plugins"
+exec "$HERE/usr/bin/iriunwebcam" "$@"
+EOS
 chmod +x AppDir/AppRun
-appimagetool AppDir IriunWebcam-2.9.3-x86_64.AppImage
+
+# 5. Add qt.conf
+echo -e "[Paths]\nPlugins=../lib/qt6/plugins" > AppDir/usr/bin/qt.conf
+
+# 6. Package
+appimagetool AppDir IriunWebcam-2.9.3-x86_64.AppImage  # -> 39M (37M squashfs zstd)
 ```
 
-AppImage built with `appimagetool` continuous (runtime-x86_64, squashfs zstd, 2.0 MiB). Output verified with `sbuild validate` (0 errors) for soarpkgs.
+AppImage built with `appimagetool` continuous (runtime-x86_64, squashfs zstd). Output verified with `sbuild validate` (0 errors) for soarpkgs.
 
 ## Soar package
 
